@@ -1,0 +1,3 @@
+# .gitignore
+zone/*
+config.json
