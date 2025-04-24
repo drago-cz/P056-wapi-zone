@@ -1,3 +1,4 @@
 # .gitignore
 zone/*
+zone_ns_comparison.csv
 config.json
