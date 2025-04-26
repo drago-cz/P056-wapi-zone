@@ -16,9 +16,9 @@ ZONE_DIR    = Path(__file__).parent / "zone"
 # ---------- Načtení konfigurace ----------
 def load_config():
     if not CONFIG_PATH.exists():
-        print(f"Konfigurační soubor nenalezen: {CONFIG_PATH}")
-        print(f"Vytvořte soubor {CONFIG_PATH} s uživatelským jménem a heslem.")
-        print("Příklad:")
+        print(f"Configuration file {CONFIG_PATH} not found.")
+        print(f"Create a {CONFIG_PATH} file with a username and password.")
+        print("Example:")
         print("""
         {
             "user": "admin@domain.tld",
@@ -30,20 +30,22 @@ def load_config():
 
 # ---------- Volání WAPI ----------
 def call_wapi(user: str, password: str, command: str, data: dict = None,
-              clTRID: str = "cli-001", test: bool = False):
+              clTRID: str = "wapi-zone", test: bool = False):
     if data is None:
         data = {}
-    hour     = datetime.now(timezone.utc).astimezone().strftime("%H")
-    hashed_pw = hashlib.sha1(password.encode("utf-8")).hexdigest()
-    auth     = hashlib.sha1((user + hashed_pw + hour).encode("utf-8")).hexdigest()
+    hour        = datetime.now(timezone.utc).astimezone().strftime("%H")
+    hashed_pw   = hashlib.sha1(password.encode("utf-8")).hexdigest()
+    auth        = hashlib.sha1((user + hashed_pw + hour).encode("utf-8")).hexdigest()
+    # základní JSON-objekt požadavku
     req = {
         "user":    user,
         "auth":    auth,
         "command": command,
         "clTRID":  clTRID
     }
-    if data: req["data"] = data
-    if test: req["test"] = 1
+    if data: req["data"] = data # Přidáme klíč "data", jen pokud je slovník data neprázdný
+    if test: req["test"] = 1 # Přidáme klíč "test": 1, pokud byl test=True, čímž signalizujeme WAPI, že má příkaz jen zkontrolovat
+    # API očekává, že celý obsah pošleme jako hodnotu klíče "request".
     wrapper  = {"request": req}
     json_str = json.dumps(wrapper, separators=(",", ":"))
     raw_body = "request=" + urllib.parse.quote(json_str)
@@ -59,20 +61,21 @@ def call_wapi(user: str, password: str, command: str, data: dict = None,
 
 # ---------- Akce v menu ----------
 def test_connection(cfg):
-    print("\n=== Test připojení k WAPI (ping) ===")
+    print("\n=== Do a WAPI connection test (ping) ===")
     result = call_wapi(cfg["user"], cfg["password"], "ping", clTRID="test-ping")
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 def list_domains(cfg):
-    print("\n=== Seznam domén ===")
+    print("\n=== List of domains ===")
     result = call_wapi(cfg["user"], cfg["password"], "domains-list", clTRID="list-domains")
     resp = result.get("response", {})
     print("\n-- RAW RESPONSE --")
     print(json.dumps(result, indent=2, ensure_ascii=False))
+    # Pokud je kód 1000 - OK, pak je vše v pořádku
     if resp.get("code") in (1000, "1000"):
         domain_dict = resp.get("data", {}).get("domain", {})
         if not domain_dict:
-            print("Žádné domény nebyly nalezeny.")
+            print("No domains were found.")
             return
         header = f"{'Name':<30} {'Status':<10} {'Expiration':<12}"
         sep    = f"{'-'*30} {'-'*10} {'-'*12}"
@@ -81,10 +84,10 @@ def list_domains(cfg):
         for rec in domain_dict.values():
             print(f"{rec.get('name',''):<30} {rec.get('status',''):<10} {rec.get('expiration',''):<12}")
     else:
-        print("Chyba při načítání domén:")
+        print("An error occurred when loading the list of domains via WAPI:")
 
 def list_dns_domains(cfg):
-    print("\n=== Seznam DNS domén ===")
+    print("\n=== DNS list for domains ===")
     result = call_wapi(cfg["user"], cfg["password"], "dns-domains-list", clTRID="list-dns-domains")
     resp = result.get("response", {})
     print("\n-- RAW RESPONSE --")
@@ -92,7 +95,7 @@ def list_dns_domains(cfg):
     if resp.get("code") in (1000, "1000"):
         dns_dict = resp.get("data", {}).get("domain", {})
         if not dns_dict:
-            print("Žádné DNS domény nebyly nalezeny.")
+            print("No DNS for the domains were found.")
             return
         header = f"{'Name':<30} {'Status':<10} {'Type':<10}"
         sep    = f"{'-'*30} {'-'*10} {'-'*10}"
@@ -101,19 +104,19 @@ def list_dns_domains(cfg):
         for rec in dns_dict.values():
             print(f"{rec.get('name',''):<30} {rec.get('status',''):<10} {rec.get('type',''):<10}")
     else:
-        print("Chyba při načítání DNS domén:")
+        print("Error loading DNS list for domains:")
 
 def generate_zone_files(cfg):
-    print("\n=== Generování zónových souborů ===")
+    print("\n=== Generate zone files ===")
     result = call_wapi(cfg["user"], cfg["password"], "dns-domains-list", clTRID="gen-zone-dns-domains")
     resp = result.get("response", {})
     if resp.get("code") not in (1000, "1000"):
-        print("Chyba při načítání DNS domén:")
+        print("Error loading DNS list for domains:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
     dns_dict = resp.get("data", {}).get("domain", {})
     if not dns_dict:
-        print("Žádné DNS domény nebyly nalezeny.")
+        print("No DNS for the domains were found.")
         return
     ZONE_DIR.mkdir(exist_ok=True)
     for rec in dns_dict.values():
@@ -124,13 +127,13 @@ def generate_zone_files(cfg):
                                clTRID=f"rows-{domain_name}")
         row_resp = row_result.get("response", {})
         if row_resp.get("code") not in (1000, "1000"):
-            print(f"Chyba u dns-rows-list pro {domain_name}:")
+            print(f"Error with dns-rows-list for domain {domain_name}:")
             print(json.dumps(row_result, indent=2, ensure_ascii=False))
             continue
         row_data = row_resp.get("data", {}).get("row", {})
         rows = row_data.values() if isinstance(row_data, dict) else row_data
         if not rows:
-            print(f"Žádné záznamy pro DNS-doménu {domain_name}.")
+            print(f"No DNS records for the domain {domain_name}.")
             continue
         zone_path = ZONE_DIR / f"{domain_name}.zone"
         with open(zone_path, "w", encoding="utf-8") as f:
@@ -141,18 +144,19 @@ def generate_zone_files(cfg):
                 rdtype = row.get("rdtype") or ""
                 rdata  = row.get("rdata") or ""
                 f.write(f"{name}\t{ttl}\tIN\t{rdtype}\t{rdata}\n")
-        print(f"Vygenerován soubor: {zone_path}")
+        print(f"A zone file has been generated for the domain: {zone_path}")
 
 def compare_zone_ns(cfg):
-    print("\n=== Porovnání všech DNS záznamů z zone/ vs WAPI ===")
+    print("\n=== Compare all DNS records from zone/ directory vs WAPI ===")
     if not ZONE_DIR.exists():
-        print(f"Složka {ZONE_DIR} neexistuje.")
+        print(f"The {ZONE_DIR} folder does not exist.")
         return
 
     results = []
     for path in sorted(ZONE_DIR.iterdir()):
+        # ignorujeme soubory, které nejsou .zone
         if path.suffix != ".zone":
-            print(f"Ignorován soubor: {path.name}")
+            print(f"The file was ignored: {path.name}")
             continue
 
         domain = path.stem
@@ -171,7 +175,7 @@ def compare_zone_ns(cfg):
                 rtype = parts[3]
                 rdata = " ".join(parts[4:]).rstrip(".")
                 zone_records.append((name, ttl, rtype, rdata))
-        print(f"Soubor {path.name} – načteno záznamů: {len(zone_records)}")
+        print(f"From zone file {path.name} – records retrieved: {len(zone_records)}")
 
         # 2) Načti všechny záznamy z WAPI (dns-rows-list)
         wapi_resp = call_wapi(
@@ -181,8 +185,9 @@ def compare_zone_ns(cfg):
             clTRID=f"cmp-{domain}"
         )
         resp = wapi_resp.get("response", {})
+        # Pokud není kód 1000 - OK, pak vrať chybu
         if resp.get("code") not in (1000, "1000"):
-            print(f"Chyba WAPI u {domain}: {resp.get('result')}")
+            print(f"WAPI returned an error for {domain}: {resp.get('result')}")
             continue
 
         data_field = resp.get("data", {})
@@ -205,7 +210,7 @@ def compare_zone_ns(cfg):
             rtype = r.get("rdtype", "")
             rdata = r.get("rdata", "").rstrip(".")
             wapi_records.append((name, ttl, rtype, rdata))
-        print(f"WAPI {domain} – načteno záznamů: {len(wapi_records)}")
+        print(f"From WAPI {domain} – records retrieved: {len(wapi_records)}")
 
         # 3) Porovnej obě množiny
         set_zone = set(zone_records)
@@ -213,11 +218,11 @@ def compare_zone_ns(cfg):
         all_recs = sorted(set_zone | set_wapi)
         for name, ttl, rtype, rdata in all_recs:
             if (name, ttl, rtype, rdata) in set_zone and (name, ttl, rtype, rdata) in set_wapi:
-                status, note = "shodný", ""
+                status, note = "matching", ""
             elif (name, ttl, rtype, rdata) in set_zone:
-                status, note = "chybí", "chybí v WAPI"
+                status, note = "missing", "missing in WAPI"
             else:
-                status, note = "rozdíl", "chybí v zone souboru"
+                status, note = "difference", "missing in zone file"
             results.append({
                 "domain": domain,
                 "name":   name,
@@ -243,13 +248,13 @@ def compare_zone_ns(cfg):
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(results)
-    print(f"\nCSV uloženo: {csv_path}")
+    print(f"\nResult saved to CSV: {csv_path}")
 
 def sync_zone_records(cfg):
-    print("\n=== Přidej/Oprav záznamy ze zone/ do WAPI ===")
+    print("\n=== Add/Repair records from zone files in zone/ directory to WAPI ===")
     # 1) Zkontroluj, že mám složku s .zone soubory
     if not ZONE_DIR.exists():
-        print(f"Složka {ZONE_DIR} neexistuje.")
+        print(f"The {ZONE_DIR} folder does not exist.")
         return
 
     # 2) Nejprve zjisti, které domény už jsou v DNS (dns-domains-list)
@@ -262,11 +267,11 @@ def sync_zone_records(cfg):
     # 3) Pro každou .zone soubor
     for path in sorted(ZONE_DIR.iterdir()):
         if path.suffix != ".zone":
-            print(f"Ignorován soubor: {path.name}")
+            print(f"The file was ignored: {path.name}")
             continue
 
         domain = path.stem
-        print(f"\n--- Zpracovávám doménu {domain} ---")
+        print(f"\n--- I'm processing the domain {domain} ---")
 
         # 4) Načti lokální záznamy
         zone_map = {}
@@ -277,11 +282,11 @@ def sync_zone_records(cfg):
                 rdata = " ".join(parts[4:]).rstrip(".")
                 key = (name or "@", rtype)
                 zone_map[key] = (ttl, rdata)
-        print(f" Lokálně: {len(zone_map)} záznamů")
+        print(f" Locally: {len(zone_map)} records")
 
         # 5) Pokud doména není v DNS, přidej ji
         if domain not in dns_domains:
-            print(f" Přidávám doménu {domain}")
+            print(f" Adding domain {domain}")
             call_wapi(cfg["user"], cfg["password"], "dns-domain-add",
                       data={"name": domain},
                       clTRID=f"add-domain-{domain}")
@@ -293,7 +298,7 @@ def sync_zone_records(cfg):
                              clTRID=f"sync-rows-{domain}")
         rcode = row_resp.get("response", {}).get("code")
         if rcode not in ("1000", 1000):
-            print(f" Chyba při načítání záznamů WAPI: {row_resp}")
+            print(f" Error loading records from WAPI: {row_resp}")
             continue
 
         data_field = row_resp["response"]["data"]
@@ -314,13 +319,13 @@ def sync_zone_records(cfg):
             ttl = str(r.get("ttl", ""))
             rdata = r.get("rdata", "").rstrip(".")
             wapi_map[(name, rtype)] = (row_id, ttl, rdata)
-        print(f" WAPI: {len(wapi_map)} záznamů")
+        print(f" WAPI: {len(wapi_map)} records")
 
         # 8) Přidání nebo aktualizace lokálních záznamů
         for key, (z_ttl, z_rdata) in zone_map.items():
             name, rtype = key
             if key not in wapi_map:
-                print(f" Přidávám záznam {name} {rtype}")
+                print(f" Adding record {name} {rtype}")
                 call_wapi(cfg["user"], cfg["password"], "dns-row-add",
                           data={"domain": domain,
                                 "name": name,
@@ -331,7 +336,7 @@ def sync_zone_records(cfg):
             else:
                 row_id, w_ttl, w_rdata = wapi_map[key]
                 if z_ttl != w_ttl or z_rdata != w_rdata:
-                    print(f" Aktualizuji záznam {name} {rtype}")
+                    print(f" Updating record {name} {rtype}")
                     call_wapi(cfg["user"], cfg["password"], "dns-row-update",
                               data={"domain": domain,
                                     "row_id": row_id,
@@ -343,26 +348,27 @@ def sync_zone_records(cfg):
         for key, (row_id, _, _) in wapi_map.items():
             if key not in zone_map:
                 name, rtype = key
-                print(f" Mažu záznam {name} {rtype}")
+                # prozatím vypnuto, pouze se vypisuje
+                print(f" [disabled] Deleting record {name} {rtype}")
                 """
                 call_wapi(cfg["user"], cfg["password"], "dns-row-delete",
                           data={"domain": domain, "row_id": row_id},
                           clTRID=f"del-row-{domain}-{name}")
                 """
-    print("\nSynchronizace dokončena.")
+    print("\nSynchronisation complete.")
 
 
 # ---------- Menu ----------
 def show_menu():
     print("""
-Vyber možnost:
-  1) Otestovat připojení k WAPI
-  2) Zobrazit seznam všech domén
-  3) Zobrazit seznam DNS domén
-  4) Generovat zónové soubory pro všechny DNS domény
-  5) Porovnat NS zónové soubory (zone/) s WAPI
-  6) Přidej/Oprav záznamy ze zone/
-  0) Konec
+Choose what you want to do:
+  1) Do a WAPI connection test (ping)
+  2) List of domains
+  3) DNS list for domains
+  4) Generate zone files
+  5) Compare all DNS records from zone/ directory vs WAPI
+  6) Add/Repair records from zone files in zone/ directory to WAPI
+  0) Exit
 """)
 
 def main():
@@ -383,10 +389,10 @@ def main():
         elif choice == "6":
             sync_zone_records(cfg)     
         elif choice == "0":
-            print("Konec.")
+            print("Ending script. Have a nice day.")
             break
         else:
-            print("Neplatná volba, zkuste znovu.")
+            print("Invalid choice, try again.")
 
 if __name__ == "__main__":
     main()
