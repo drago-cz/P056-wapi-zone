@@ -13,6 +13,12 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 API_URL     = "https://api.wedos.com/wapi/json"
 ZONE_DIR    = Path(__file__).parent / "zone"
 
+
+# Check if ZONE_DIR exists, create if it doesn't
+if not ZONE_DIR.exists():
+    ZONE_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"Directory '{ZONE_DIR}' has been created. We will use it to store zone files.")
+
 # ---------- Načtení konfigurace ----------
 def load_config():
     if not CONFIG_PATH.exists():
