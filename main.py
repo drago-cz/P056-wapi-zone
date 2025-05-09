@@ -65,6 +65,59 @@ def call_wapi(user: str, password: str, command: str, data: dict = None,
     except requests.RequestException as e:
         return {"error": str(e)}
 
+# ---------- Helper to parse zone files in both formats ----------
+def parse_zone_file(path: Path):
+    """
+    Read a .zone file and return a list of tuples:
+      (name, ttl, rtype, rdata)
+    Supports both:
+      - full-FQDN + inline TTL
+      - $ORIGIN/$TTL directives + relative names (@, www, *)
+    """
+    origin = path.stem  # fallback if no $ORIGIN directive
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith(';'):
+            continue
+
+        # capture a $ORIGIN directive, if present
+        if line.upper().startswith('$ORIGIN'):
+            parts = line.split()
+            if len(parts) >= 2:
+                origin = parts[1].rstrip('.')
+            continue
+
+        # skip TTL directive lines
+        if line.upper().startswith('$TTL'):
+            continue
+
+        parts = line.split()
+        # expect: name, ttl, class(IN), type, rdata...
+        if len(parts) < 5 or parts[2].upper() != 'IN':
+            continue
+
+        raw_name, ttl, _, rtype = parts[0], parts[1], parts[2], parts[3]
+        rdata = " ".join(parts[4:]).rstrip('.')
+
+        # normalize record name
+        if raw_name == '@':
+            name = '@'
+        elif raw_name.endswith('.'):
+            bare = raw_name.rstrip('.')
+            if bare == origin:
+                name = '@'
+            elif bare.endswith('.' + origin):
+                name = bare[:-(len(origin) + 1)]
+            else:
+                name = bare
+        else:
+            name = raw_name
+
+        records.append((name, ttl, rtype, rdata))
+    return records
+
+
 # ---------- Akce v menu ----------
 def test_connection(cfg):
     print("\n=== Do a WAPI connection test (ping) ===")
@@ -98,19 +151,29 @@ def list_dns_domains(cfg):
     resp = result.get("response", {})
     print("\n-- RAW RESPONSE --")
     print(json.dumps(result, indent=2, ensure_ascii=False))
-    if resp.get("code") in (1000, "1000"):
-        dns_dict = resp.get("data", {}).get("domain", {})
-        if not dns_dict:
-            print("No DNS for the domains were found.")
-            return
-        header = f"{'Name':<30} {'Status':<10} {'Type':<10}"
-        sep    = f"{'-'*30} {'-'*10} {'-'*10}"
-        print("\n" + header)
-        print(sep)
-        for rec in dns_dict.values():
-            print(f"{rec.get('name',''):<30} {rec.get('status',''):<10} {rec.get('type',''):<10}")
-    else:
+
+    if resp.get("code") not in (1000, "1000"):
         print("Error loading DNS list for domains:")
+        return
+
+    # Handle both dict and list for the 'domain' field
+    raw = resp.get("data", {}).get("domain", [])
+    domains = raw.values() if isinstance(raw, dict) else raw
+
+    if not domains:
+        print("No DNS domains were found.")
+        return
+
+    header = f"{'Name':<30} {'Status':<10} {'Type':<10}"
+    sep    = f"{'-'*30} {'-'*10} {'-'*10}"
+    print("\n" + header)
+    print(sep)
+    for rec in domains:
+        name   = rec.get("name","")
+        status = rec.get("status","")
+        dtype  = rec.get("type","")
+        print(f"{name:<30} {status:<10} {dtype:<10}")
+
 
 def generate_zone_files(cfg):
     print("\n=== Generate zone files ===")
@@ -120,27 +183,41 @@ def generate_zone_files(cfg):
         print("Error loading DNS list for domains:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
-    dns_dict = resp.get("data", {}).get("domain", {})
-    if not dns_dict:
-        print("No DNS for the domains were found.")
+
+    # Handle both dict and list responses
+    raw = resp.get("data", {}).get("domain", [])
+    domains = raw.values() if isinstance(raw, dict) else raw
+
+    if not domains:
+        print("No DNS domains were found.")
         return
+
     ZONE_DIR.mkdir(exist_ok=True)
-    for rec in dns_dict.values():
+
+    for rec in domains:
         domain_name = rec.get("name")
-        if not domain_name: continue
-        row_result = call_wapi(cfg["user"], cfg["password"], "dns-rows-list",
-                               data={"domain": domain_name},
-                               clTRID=f"rows-{domain_name}")
+        if not domain_name:
+            continue
+
+        row_result = call_wapi(
+            cfg["user"], cfg["password"],
+            "dns-rows-list",
+            data={"domain": domain_name},
+            clTRID=f"rows-{domain_name}"
+        )
         row_resp = row_result.get("response", {})
         if row_resp.get("code") not in (1000, "1000"):
             print(f"Error with dns-rows-list for domain {domain_name}:")
             print(json.dumps(row_result, indent=2, ensure_ascii=False))
             continue
+
         row_data = row_resp.get("data", {}).get("row", {})
         rows = row_data.values() if isinstance(row_data, dict) else row_data
+
         if not rows:
             print(f"No DNS records for the domain {domain_name}.")
             continue
+
         zone_path = ZONE_DIR / f"{domain_name}.zone"
         with open(zone_path, "w", encoding="utf-8") as f:
             f.write(f"$ORIGIN {domain_name}.\n$TTL 3600\n\n")
@@ -150,7 +227,9 @@ def generate_zone_files(cfg):
                 rdtype = row.get("rdtype") or ""
                 rdata  = row.get("rdata") or ""
                 f.write(f"{name}\t{ttl}\tIN\t{rdtype}\t{rdata}\n")
+
         print(f"A zone file has been generated for the domain: {zone_path}")
+
 
 def compare_zone_ns(cfg):
     print("\n=== Compare all DNS records from zone/ directory vs WAPI ===")
@@ -168,19 +247,8 @@ def compare_zone_ns(cfg):
         domain = path.stem
 
         # 1) Načti všechny záznamy z lokálního zone souboru
-        zone_records = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("$") or line.startswith(";"):
-                continue
-            parts = line.split()
-            # očekáváme: name, ttl, class(IN), type, rdata...
-            if len(parts) >= 5 and parts[2].upper() == "IN":
-                name  = parts[0]
-                ttl   = parts[1]
-                rtype = parts[3]
-                rdata = " ".join(parts[4:]).rstrip(".")
-                zone_records.append((name, ttl, rtype, rdata))
+        zone_records = parse_zone_file(path)
+
         print(f"From zone file {path.name} – records retrieved: {len(zone_records)}")
 
         # 2) Načti všechny záznamy z WAPI (dns-rows-list)
@@ -280,14 +348,10 @@ def sync_zone_records(cfg):
         print(f"\n--- I'm processing the domain {domain} ---")
 
         # 4) Načti lokální záznamy
-        zone_map = {}
-        for line in path.read_text(encoding="utf-8").splitlines():
-            parts = line.strip().split()
-            if len(parts) >= 5 and parts[2].upper() == "IN":
-                name, ttl, _, rtype = parts[0], parts[1], parts[2], parts[3]
-                rdata = " ".join(parts[4:]).rstrip(".")
-                key = (name or "@", rtype)
-                zone_map[key] = (ttl, rdata)
+        zone_map = {
+            (name, rtype): (ttl, rdata)
+            for name, ttl, rtype, rdata in parse_zone_file(path)
+        }
         print(f" Locally: {len(zone_map)} records")
 
         # 5) Pokud doména není v DNS, přidej ji
