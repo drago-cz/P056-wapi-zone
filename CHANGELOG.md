@@ -4,6 +4,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2025-05-09
+
+### Added
+- Introduced `parse_zone_file` to simplify parsing `.zone` files. The function supports both inline TTLs and `$ORIGIN/$TTL` directives with relative names.
+  
+### Changed
+- Updated `list_dns_domains` to handle `domain` data in both `dict` and `list` formats and improved error handling for DNS fetching.
+- Enhanced `generate_zone_files` to adapt to multiple DNS domain data formats and streamlined the zone file generation process.
+- Refactored `compare_zone_ns` for cleaner logic by leveraging the `parse_zone_file` helper function.
+- Simplified `sync_zone_records` by replacing manual zone record mapping logic with the use of `parse_zone_file`.
+
+### Removed
+- Deprecated manual parsing logic for `.zone` files in `compare_zone_ns` and `sync_zone_records`.
+
 ## [0.1.0] – 2025-04-27
 
 ### Added
