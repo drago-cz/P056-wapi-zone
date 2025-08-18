@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 CONFIG_PATH = Path(__file__).parent / "config.json"
 API_URL     = "https://api.wedos.com/wapi/json"
 ZONE_DIR    = Path(__file__).parent / "zone"
-
+TXT_RDATA_STRIP = '"'
 
 # Check if ZONE_DIR exists, create if it doesn't
 if not ZONE_DIR.exists():
@@ -98,7 +98,12 @@ def parse_zone_file(path: Path):
             continue
 
         raw_name, ttl, _, rtype = parts[0], parts[1], parts[2], parts[3]
-        rdata = " ".join(parts[4:]).rstrip('.')
+        rdata_raw = " ".join(parts[4:])
+        if rtype.upper() in ("TXT", "SPF"):
+            # zachovej přesně, ale odstraň definované znaky
+            rdata = rdata_raw.translate({ord(c): None for c in TXT_RDATA_STRIP})
+        else:
+            rdata = rdata_raw.rstrip('.')  # typy s FQDN v rdata (NS, CNAME, MX target, atd.)
 
         # normalize record name
         if raw_name == '@':
@@ -117,7 +122,6 @@ def parse_zone_file(path: Path):
         records.append((name, ttl, rtype, rdata))
     return records
 
-
 # ---------- Akce v menu ----------
 def test_connection(cfg):
     print("\n=== Do a WAPI connection test (ping) ===")
@@ -130,18 +134,24 @@ def list_domains(cfg):
     resp = result.get("response", {})
     print("\n-- RAW RESPONSE --")
     print(json.dumps(result, indent=2, ensure_ascii=False))
-    # Pokud je kód 1000 - OK, pak je vše v pořádku
+
     if resp.get("code") in (1000, "1000"):
         domain_dict = resp.get("data", {}).get("domain", {})
         if not domain_dict:
             print("No domains were found.")
             return
+
         header = f"{'Name':<30} {'Status':<10} {'Expiration':<12}"
         sep    = f"{'-'*30} {'-'*10} {'-'*12}"
         print("\n" + header)
         print(sep)
         for rec in domain_dict.values():
-            print(f"{rec.get('name',''):<30} {rec.get('status',''):<10} {rec.get('expiration',''):<12}")
+            name = rec.get('name', '')
+            status = rec.get('status', '')
+            # koalescence None -> ''
+            expiration = rec.get('expiration') or ''
+            # nebo: expiration = '' if rec.get('expiration') is None else str(rec.get('expiration'))
+            print(f"{name:<30} {status:<10} {expiration:<12}")
     else:
         print("An error occurred when loading the list of domains via WAPI:")
 
@@ -347,12 +357,15 @@ def sync_zone_records(cfg):
         domain = path.stem
         print(f"\n--- I'm processing the domain {domain} ---")
 
-        # 4) Načti lokální záznamy
-        zone_map = {
-            (name, rtype): (ttl, rdata)
-            for name, ttl, rtype, rdata in parse_zone_file(path)
-        }
-        print(f" Locally: {len(zone_map)} records")
+        # 4) Načti lokální záznamy (NEPŘEPISUJ stejné (name, type) – drž seznamy)
+        zone_records = list(parse_zone_file(path))
+        print(f" Locally: {len(zone_records)} records")
+
+        from collections import defaultdict
+        zone_multi = defaultdict(list)  # key=(name, rtype) -> list of (ttl, rdata)
+        for name, ttl, rtype, rdata in zone_records:
+            ttl_str = str(ttl or "")
+            zone_multi[(name, rtype)].append((ttl_str, rdata))
 
         # 5) Pokud doména není v DNS, přidej ji
         if domain not in dns_domains:
@@ -380,53 +393,59 @@ def sync_zone_records(cfg):
         else:
             rows = []
 
-        # 7) Sestav mapu WAPI: key=(name,type)->(row_id, ttl, rdata)
-        wapi_map = {}
+        # 7) Sestav index WAPI: key=(name, rtype) -> dict[rdata] = (row_id, ttl)
+        wapi_index = defaultdict(dict)
         for r in rows:
-            name = r.get("name") or "@"
+            name  = r.get("name") or "@"
             rtype = r.get("rdtype", "")
             row_id = r.get("ID")
-            ttl = str(r.get("ttl", ""))
+            ttl   = str(r.get("ttl", ""))
             rdata = r.get("rdata", "").rstrip(".")
-            wapi_map[(name, rtype)] = (row_id, ttl, rdata)
-        print(f" WAPI: {len(wapi_map)} records")
+            wapi_index[(name, rtype)][rdata] = (row_id, ttl)
 
-        # 8) Přidání nebo aktualizace lokálních záznamů
-        for key, (z_ttl, z_rdata) in zone_map.items():
+        print(f" WAPI: {len(list(rows))} records")
+
+        # 8) Přidání nebo aktualizace lokálních záznamů (po jednotlivých rdata)
+        for key, items in zone_multi.items():
             name, rtype = key
-            if key not in wapi_map:
-                print(f" Adding record {name} {rtype}")
-                call_wapi(cfg["user"], cfg["password"], "dns-row-add",
-                          data={"domain": domain,
-                                "name": name,
-                                "ttl": z_ttl,
-                                "type": rtype,
-                                "rdata": z_rdata},
-                          clTRID=f"add-row-{domain}-{name}")
-            else:
-                row_id, w_ttl, w_rdata = wapi_map[key]
-                if z_ttl != w_ttl or z_rdata != w_rdata:
-                    print(f" Updating record {name} {rtype}")
-                    call_wapi(cfg["user"], cfg["password"], "dns-row-update",
+            present = wapi_index.get(key, {})
+            for z_ttl, z_rdata in items:
+                if z_rdata not in present:
+                    print(f" Adding record {name} {rtype}")
+                    call_wapi(cfg["user"], cfg["password"], "dns-row-add",
                               data={"domain": domain,
-                                    "row_id": row_id,
+                                    "name": name,
                                     "ttl": z_ttl,
+                                    "type": rtype,
                                     "rdata": z_rdata},
-                              clTRID=f"upd-row-{domain}-{name}")
+                              clTRID=f"add-row-{domain}-{name}")
+                else:
+                    row_id, w_ttl = present[z_rdata]
+                    if z_ttl != w_ttl:
+                        print(f" Updating record {name} {rtype}")
+                        call_wapi(cfg["user"], cfg["password"], "dns-row-update",
+                                  data={"domain": domain,
+                                        "row_id": row_id,
+                                        "ttl": z_ttl,
+                                        "rdata": z_rdata},
+                                  clTRID=f"upd-row-{domain}-{name}")
+                    del present[z_rdata]
+            wapi_index[key] = present
 
         # 9) Smazání nadbytečných záznamů ve WAPI
-        for key, (row_id, _, _) in wapi_map.items():
-            if key not in zone_map:
-                name, rtype = key
-                # prozatím vypnuto, pouze se vypisuje
-                print(f" [disabled] Deleting record {name} {rtype}")
+        for key, leftovers in wapi_index.items():
+            if not leftovers:
+                continue
+            name, rtype = key
+            for rdata, (row_id, _) in leftovers.items():
+                print(f" [disabled] Deleting record {name} {rtype} rdata={rdata}")
                 """
                 call_wapi(cfg["user"], cfg["password"], "dns-row-delete",
                           data={"domain": domain, "row_id": row_id},
                           clTRID=f"del-row-{domain}-{name}")
                 """
-    print("\nSynchronisation complete.")
 
+    print("\nSynchronisation complete.")
 
 # ---------- Menu ----------
 def show_menu():

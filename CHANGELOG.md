@@ -4,6 +4,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2025-08-18
+### Added
+- Now it is possible to set in `TXT_RDATA_STRIP` characters that will be ignored in TXT records
+
+### Changed
+- Fixed `list_domains` to process canceled domain orders without expiration date
+- Fixed bug with multiple TXT records in `sync_zone_records`
+
 ## [0.1.1] - 2025-05-09
 
 ### Added
